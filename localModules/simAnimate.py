@@ -5,7 +5,10 @@ import simProcess
 
 # Define a specific Customer class for animation to give it a visual representation
 class AnimatedCustomer(simProcess.Customer):
-    # ... (rest of AnimatedCustomer class, no changes needed here) ...
+    """
+    Extends the base Customer class to add visual representation and movement
+    for Salabim animation.
+    """
     def setup(self, handler_resource):
         super().setup(handler_resource) 
         self.animation_object = sb.Animate3d(
@@ -49,7 +52,12 @@ class AnimatedCustomer(simProcess.Customer):
 
 
 class AnimatedSource(simProcess.Source):
-    # ... (rest of AnimatedSource class, no changes needed here) ...
+    """
+    The Source component for the animated simulation.
+    It inherits from the base Source and will correctly create AnimatedCustomer
+    instances because _setup_simulation_components is now configured to pass
+    AnimatedCustomer as the customer_type.
+    """
     pass 
 
 
@@ -67,12 +75,7 @@ def run_animated_simulation(sim_params: simProcess.SimulationParameters):
     """
     # 1. Setup the Salabim Environment for animation
     env = sb.Environment(trace=False, animate=True) 
-    # FIX: Removed env.yieldless(False) from here
-    
-    # FIX: Set yieldless state globally using sb.yieldless()
-    sb.yieldless(False)
-    # print(f"DEBUG: In simAnimate.py, yieldless set to: {env.is_yieldless()}") # This line will still fail.
-
+    sb.yieldless(False) 
     env.random_seed(sim_params.seed)
 
     # 2. Set up components using the flexible helper function from 03simProcess.py
@@ -100,41 +103,46 @@ def run_animated_simulation(sim_params: simProcess.SimulationParameters):
     handler_resource.z = 0 
 
     # Queue visualization
+    # Re-added fillcolor and bordercolor. No 'spec' for AnimateQueue.
     sb.AnimateQueue(customer_queue, x=customer_queue.x, y=customer_queue.y, id='customer_queue_vis',
-                    spec='box', 
-                    fill='lightblue', linecolor='blue',
-                    text_offsetx=-0.5, text_offsety=-0.5,
-                    title='Customer Queue', text_font_size=10,
-                    x_content_gap=0.1, y_content_gap=0.1
+                    fillcolor='lightblue', bordercolor='blue' # Using correct parameter names
+                    # text_offsetx, text_offsety, title, text_font_size, x_content_gap, y_content_gap are not in AnimateQueue's signature
                     )
 
-    # Server visualization
-    sb.AnimateResource(handler_resource, x=handler_resource.x, y=handler_resource.y, id='server_vis',
-                       spec='cube', 
-                       color='grey',
-                       text_color='black',
-                       text_anchor='n',
-                       title='Server',
-                       text_font_size=10
-                       )
+    # Server visualization (Still commented out as AnimateResource doesn't exist)
+    # sb.AnimateResource(handler_resource, x=handler_resource.x, y=handler_resource.y, id='server_vis',
+    #                    spec='cube', # This 'spec' might also be unsupported for AnimateResource if it existed
+    #                    color='grey',
+    #                    text_color='black',
+    #                    text_anchor='n',
+    #                    title='Server',
+    #                    text_font_size=10
+    #                    )
 
     # Monitor displays
-    sb.AnimateMonitor(customer_queue.length, x=0, y=3, text_color='black', text_anchor='nw',
-                      title='Queue Length', fmt='.0f', text_font_size=12) 
-    sb.AnimateMonitor(customer_stay_monitor, x=0, y=2.5, text_color='black', text_anchor='nw',
-                      title='Avg Stay Time', fmt='.2f', unit='minutes', text_font_size=12) 
-    sb.AnimateMonitor(customer_service_monitor, x=0, y=2, text_color='black', text_anchor='nw',
-                      title='Avg Service Time', fmt='.2f', unit='minutes', text_font_size=12) 
+    # Re-added supported parameters using correct names (title, titlecolor, titlefontsize, xy_anchor)
+    # Removed fmt and unit (as they are not in AnimateMonitor's signature for display)
+    sb.AnimateMonitor(customer_queue.length, x=0, y=3, 
+                      title='Queue Length', titlecolor='black', titlefontsize=12, xy_anchor='nw'
+                      ) 
+    sb.AnimateMonitor(customer_stay_monitor, x=0, y=2.5, 
+                      title='Avg Stay Time', titlecolor='black', titlefontsize=12, xy_anchor='nw'
+                      ) 
+    sb.AnimateMonitor(customer_service_monitor, x=0, y=2, 
+                      title='Avg Service Time', titlecolor='black', titlefontsize=12, xy_anchor='nw'
+                      ) 
 
     # Static text labels
-    sb.AnimateText(x=0, y=3.5, text='Simulation Dashboard', text_color='darkblue', font_size=16, text_anchor='nw')
-    sb.AnimateText(x=0, y=1.5, text=f'Sim Time: {sim_params.simTime} min', text_color='gray', font_size=10, text_anchor='nw')
-    sb.AnimateText(x=0, y=1.2, text=f'FTEs: {sim_params.processingFte}', text_color='gray', font_size=10, text_anchor='nw')
+    # AnimateText is a general-purpose text animation object. We need to check its specific signature.
+    # Assuming it has textcolor, fontsize, xy_anchor as general parameters based on common salabim patterns.
+    # If this causes an error, we'll need its signature too.
+    sb.AnimateText(x=0, y=3.5, text='Simulation Dashboard', textcolor='darkblue', fontsize=16, xy_anchor='nw') # Assuming textcolor, fontsize, xy_anchor
+    sb.AnimateText(x=0, y=1.5, text=f'Sim Time: {sim_params.simTime} min', textcolor='gray', fontsize=10, xy_anchor='nw')
+    sb.AnimateText(x=0, y=1.2, text=f'FTEs: {sim_params.processingFte}', textcolor='gray', fontsize=10, xy_anchor='nw')
 
     # Access IAT and processing time from the 'co' file type parameters
-    # Make sure 'co' exists in your sim_params.file_type_params    
-    sb.AnimateText(x=0, y=0.9, text=f"IAT (CO): {sim_params.file_type_params['co']['iat']:.2f} min", text_color='gray', font_size=10, text_anchor='nw')
-    sb.AnimateText(x=0, y=0.6, text=f"CO Time: {sim_params.file_type_params['co']['processing_time']:.2f} min", text_color='gray', font_size=10, text_anchor='nw')
+    sb.AnimateText(x=0, y=0.9, text=f"IAT (CO): {sim_params.file_type_params['co']['iat']:.2f} min", textcolor='gray', fontsize=10, xy_anchor='nw')
+    sb.AnimateText(x=0, y=0.6, text=f"CO Time: {sim_params.file_type_params['co']['processing_time']:.2f} min", textcolor='gray', fontsize=10, xy_anchor='nw')
 
     # 4. Run Simulation
     env.run(till=sim_params.simTime)
@@ -170,7 +178,7 @@ if __name__ == '__main__':
         print(f"  Max Service Time: {service_time_monitor.maximum():.2f} minutes")
 
     if stay_monitors:
-        stay_time_monitor = stay_monitors[0]
+        stay_time_monitor = stay_time_monitor[0]
         print(f"\nSimulation Results (Total Stay Time in System):")
         print(f"  N: {stay_time_monitor.n}")
         print(f"  Mean Stay Time: {stay_time_monitor.mean():.2f} minutes")

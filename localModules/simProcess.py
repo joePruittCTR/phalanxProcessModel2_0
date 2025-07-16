@@ -1,5 +1,7 @@
 import salabim as sb
 import random
+# FIX: Set yieldless state globally using sb.yieldless()
+sb.yieldless(False)
 
 # Import the Distribution class from our new simDistributions module
 from simDistributions import Distribution
@@ -190,8 +192,6 @@ def runSimulation(sim_params: SimulationParameters):
     # FIX: Removed env.yieldless(False) from here
     env = sb.Environment(trace=False)
     
-    # FIX: Set yieldless state globally using sb.yieldless()
-    sb.yieldless(False)
     # print(f"DEBUG: In simProcess.py, yieldless set to: {env.is_yieldless()}") # This line will still fail because env.is_yieldless() is a method, not a property.
 
     # 2. Set up components using the helper function (uses default Customer and Source classes)
