@@ -5,13 +5,82 @@ import random
 from simDistributions import Distribution
 
 class SimulationParameters:
-    # ... (rest of SimulationParameters class, no changes needed here) ...
+    """
+    Centralized class for defining and holding all simulation parameters.
+    It maps input parameters from 02simInput.py's format to internal, consistent names.
+    Now supports multiple file types/sensors with custom arrival distributions.
+    """
     def __init__(self, param_dict: dict):
-        # ... (parameters initialization) ...
-        self.file_type_params = {}
-        # ... (file_type_params initialization) ...
-        self._calculate_derived_parameters()
+        # General Simulation Parameters
+        self.simTime = param_dict.get('sim_time', 480) # Default 480 minutes (8 hours)
+        self.timeUnit = param_dict.get('time_unit', 'minutes')
+        self.processingFte = param_dict.get('processing_fte', 1.0)
+        self.processingOverhead = param_dict.get('processing_overhead', 0.15)
+        self.processingEfficiency = param_dict.get('processing_efficiency', 0.85)
+        self.warmupTime = param_dict.get('warmup_time', 0)
+        self.numberOfReplications = param_dict.get('num_replications', 1)
+        self.seed = param_dict.get('seed', 123) # <-- THIS LINE (and the ones above it) MUST BE PRESENT
 
+        # --- Parameters for Multiple File Types/Sensors ---
+        self.file_type_params = {}
+
+        # Define all expected file types and their default values
+        file_type_prefixes = [
+            'co', 'dk', 'ma', 'nj', 'rs', 'sv', 'tg', 'wt', # Existing types
+            'nf1', 'nf2', 'nf3', 'nf4', 'nf5', 'nf6'         # New types
+        ]
+        
+        # Add a placeholder for SIPR transfer time
+        self.siprTransferTime = param_dict.get('sipr_transfer_time', 1.0)
+
+        # Parameters for growth/efficiency (from simArrayHandler)
+        self.fileGrowth = param_dict.get('file_growth_slope', 0.0)
+        self.sensorGrowth = param_dict.get('sensor_growth_slope', 0.0)
+        self.ingestEfficiency = param_dict.get('ingest_efficiency_slope', 0.0)
+        
+        # Goal-seeking parameter
+        self.goalParameter = param_dict.get('goal_parameter', 'None')
+
+        # Define default distribution kwargs for each type for robustness
+        # These are used if specific kwargs are not provided in the input param_dict
+        default_dist_kwargs = {
+            "MonthlyMixedDist": {"num_days": 30, "first_peak_fraction": 0.05, "second_peak_fraction": 0.10, "first_peak_probability": 0.50, "second_peak_probability": 0.25},
+            "WeeklyExponential": {"num_days": 7, "first_day_probability": 0.90},
+            "MixedWeibull": {"w1": 0.6, "w2": 0.2, "w3": 0.2, "weibull_shape": 0.8, "weibull_scale": 1.0, "norm_mu": 5, "norm_sigma": 1, "expon_lambda": 0.5},
+            "BimodalExpon": {"lambda1": 0.5, "lambda2": 0.5, "weight1": 3/5, "loc2": 15},
+            "BetaDistribution": {"alpha": 2, "beta": 5},
+            "Exponential": {} # Default Salabim exponential (no extra kwargs needed for our wrapper)
+        }
+
+        for prefix in file_type_prefixes:
+            # Get raw values from the input param_dict
+            proc_time = param_dict.get(f'{prefix}_time', 10.0)
+            iat_val = param_dict.get(f'{prefix}_iat', 1.0)
+            files_per_month = param_dict.get(f'{prefix}_files_per_month', 0.0)
+            batch_size = param_dict.get(f'{prefix}_batch_size', 1)
+            
+            # Get distribution type and kwargs
+            distribution_type = param_dict.get(f'{prefix}_distribution_type', 'Exponential') # Default to Exponential
+            
+            # Get specific kwargs for this file type's distribution, or use defaults
+            dist_kwargs = param_dict.get(f'{prefix}_distribution_kwargs', {})
+            # Merge with default kwargs for the chosen distribution type
+            final_dist_kwargs = default_dist_kwargs.get(distribution_type, {}).copy()
+            final_dist_kwargs.update(dist_kwargs) # User-provided kwargs override defaults
+
+            self.file_type_params[prefix] = {
+                'name': prefix.upper(),
+                'processing_time': proc_time,
+                'iat': iat_val,
+                'files_per_month': files_per_month,
+                'batch_size': batch_size,
+                'distribution_type': distribution_type,
+                'distribution_kwargs': final_dist_kwargs,
+                'server_time': 0.0 # Will be calculated
+            }
+        
+        # --- Calculated Parameters (for all file types) ---
+        self._calculate_derived_parameters()
     def _calculate_derived_parameters(self):
         # ... (derived parameters calculation) ...
         pass
