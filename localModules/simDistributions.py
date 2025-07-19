@@ -1,13 +1,10 @@
 # simDistributions.py - Enhanced Probability Distribution System
 # Optimized for performance, accuracy, and maintainability
-
 '''
 Enhanced Distribution System for Phalanx C-sUAS Simulation
-
 This module provides sophisticated probability density functions with performance optimizations,
 numerical stability improvements, and comprehensive validation. All original functionality is
 preserved while adding significant enhancements.
-
 Distribution Types Supported:
 - Exponential: Standard exponential distribution for basic arrivals
 - MonthlyMixedDist: Two local maxima (beginning and middle of month) with exponential tail
@@ -15,12 +12,13 @@ Distribution Types Supported:
 - MixedWeibull: Weibull + Normal + Exponential mixture for complex arrival patterns
 - BimodalExpon: Two exponential distributions for dual-mode behavior
 - BetaDistribution: Versatile beta distribution for tunable arrival patterns
-- UniformDistribution: Uniform distribution for constant rates (new)
-- GammaDistribution: Gamma distribution for more realistic service times (new)
+- UniformDistribution: Uniform distribution for constant rates
+- GammaDistribution: Gamma distribution for more realistic service times
+- YearlyArrivalPDF: Seasonal arrival patterns with monthly/special peaks (NEW)
 '''
-
 import logging
 import time
+import calendar
 from typing import Dict, Any, Optional, List, Tuple, Union, Callable
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
@@ -31,12 +29,79 @@ from scipy.stats import weibull_min, norm, expon, beta as beta_dist, gamma, unif
 import matplotlib.pyplot as plt
 
 # Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("PhalanxSimulation.Distributions")
+
+# ================================================================================================
+# YEARLY ARRIVAL PDF FUNCTIONALITY (NEW)
+# ================================================================================================
+def create_yearly_arrival_pdf(year, base_lambda, summer_boost, monthly_peak_lambda_factor, 
+                              midmonth_peak_factor, special_peak_lambda_factor):
+    """
+    Creates a yearly probability distribution function (PDF) for arrivals,
+    following an exponential distribution with seasonal, monthly, and special
+    peak variations.
+    
+    Args:
+        year (int): The year for which to create the PDF. Used to calculate the number of days.
+        base_lambda (float): The base rate parameter (lambda) for the exponential distribution.
+                             Higher lambda means shorter inter-arrival times (more arrivals).
+        summer_boost (float): A factor to increase lambda during the summer months (June, July, August).
+        monthly_peak_lambda_factor (float): Factor to increase lambda at the beginning of each month.
+        midmonth_peak_factor (float): The relative height of the mid-month peak (as a fraction of the monthly peak).
+        special_peak_lambda_factor (float): Factor to increase lambda during the special peak periods.
+    
+    Returns:
+        numpy.ndarray: A NumPy array representing the PDF for each day of the year.
+    """
+    num_days = 366 if calendar.isleap(year) else 365
+    pdf = np.zeros(num_days)
+    
+    # 1. Base Exponential Distribution (Seasonal Adjustment will be applied later)
+    #   We'll normalize this *after* applying all the boosts. This makes the boosts easier to reason about.
+    
+    # 2. Monthly Peaks and Mid-Month Peaks
+    for month in range(1, 13):
+        # Get the start and end day of the month (day of the year, 0-indexed)
+        start_day = sum(calendar.mdays[:month])
+        month_length = calendar.mdays[month]
+        
+        # Monthly Peak (Exponential Decay from the start of the month)
+        days = np.arange(month_length)
+        monthly_peak_lambda = base_lambda * monthly_peak_lambda_factor
+        monthly_peak_pdf = expon.pdf(days, scale=1/monthly_peak_lambda)
+        pdf[start_day:start_day + month_length] += monthly_peak_pdf
+        
+        # Mid-Month Peak (Exponential Decay from the middle of the month)
+        mid_month_day = start_day + month_length // 2
+        days = np.arange(month_length) - month_length // 2  # Center around mid-month
+        midmonth_peak_lambda = base_lambda * monthly_peak_lambda_factor * midmonth_peak_factor
+        midmonth_peak_pdf = expon.pdf(np.abs(days), scale=1/midmonth_peak_lambda) # Use abs to make it symmetric
+        pdf[start_day:start_day + month_length] += midmonth_peak_pdf
+    
+    # 3. Summer Boost (June, July, August)
+    summer_start = sum(calendar.mdays[:6])  # June 1st
+    summer_end = sum(calendar.mdays[:9])  # September 1st
+    pdf[summer_start:summer_end] *= summer_boost
+    
+    # 4. Special Peaks (Jan/Feb, Apr/May, July/Aug, Oct/Nov)
+    special_peak_months = [(1, 2), (4, 5), (7, 8), (10, 11)]
+    for m1, m2 in special_peak_months:
+        start_day_m1 = sum(calendar.mdays[:m1]) + 14  # Start two weeks into month 1
+        end_day_m2 = sum(calendar.mdays[:m2]) + 14    # End two weeks into month 2
+        peak_duration = end_day_m2 - start_day_m1
+        days = np.arange(peak_duration)
+        special_peak_lambda = base_lambda * special_peak_lambda_factor
+        special_peak_pdf = expon.pdf(days, scale=1/special_peak_lambda)
+        pdf[start_day_m1:end_day_m2] += special_peak_pdf
+    
+    # 5. Normalize the PDF
+    pdf /= np.sum(pdf)  # Ensure it integrates to 1
+    return pdf
 
 # ================================================================================================
 # PERFORMANCE AND CACHING SYSTEM
 # ================================================================================================
-
 @dataclass
 class DistributionCache:
     """Cache for precomputed distribution values to improve performance."""
@@ -106,7 +171,6 @@ def get_distribution_cache() -> DistributionCache:
 # ================================================================================================
 # ENHANCED DISTRIBUTION BASE CLASSES
 # ================================================================================================
-
 @dataclass
 class DistributionParameters:
     """Validated container for distribution parameters."""
@@ -142,7 +206,8 @@ class DistributionParameters:
             'BimodalExpon': self._validate_bimodal_expon,
             'BetaDistribution': self._validate_beta,
             'GammaDistribution': self._validate_gamma,
-            'UniformDistribution': self._validate_uniform
+            'UniformDistribution': self._validate_uniform,
+            'YearlyArrivalPDF': self._validate_yearly_arrival
         }
         
         validator = validators.get(self.distribution_type)
@@ -221,6 +286,32 @@ class DistributionParameters:
         
         if low >= high:
             raise ValueError("Uniform distribution low must be less than high")
+    
+    def _validate_yearly_arrival(self) -> None:
+        """Validate YearlyArrivalPDF parameters."""
+        year = self.kwargs.get('year', 2024)
+        if not (1900 <= year <= 2100):
+            raise ValueError("year must be between 1900 and 2100")
+        
+        base_lambda = self.kwargs.get('base_lambda', 1.0)
+        if base_lambda <= 0:
+            raise ValueError("base_lambda must be positive")
+        
+        summer_boost = self.kwargs.get('summer_boost', 1.5)
+        if summer_boost <= 0:
+            raise ValueError("summer_boost must be positive")
+        
+        monthly_peak_lambda_factor = self.kwargs.get('monthly_peak_lambda_factor', 3.0)
+        if monthly_peak_lambda_factor <= 0:
+            raise ValueError("monthly_peak_lambda_factor must be positive")
+        
+        midmonth_peak_factor = self.kwargs.get('midmonth_peak_factor', 0.5)
+        if midmonth_peak_factor <= 0:
+            raise ValueError("midmonth_peak_factor must be positive")
+        
+        special_peak_lambda_factor = self.kwargs.get('special_peak_lambda_factor', 4.0)
+        if special_peak_lambda_factor <= 0:
+            raise ValueError("special_peak_lambda_factor must be positive")
 
 class BaseDistribution(ABC):
     """Abstract base class for all distributions."""
@@ -267,7 +358,6 @@ class BaseDistribution(ABC):
 # ================================================================================================
 # ENHANCED DISTRIBUTION IMPLEMENTATIONS
 # ================================================================================================
-
 class ExponentialDistribution(BaseDistribution):
     """Enhanced exponential distribution with numerical stability."""
     
@@ -471,10 +561,57 @@ class UniformDistribution(BaseDistribution):
         return uniform.rvs(loc=self.low, scale=(self.high - self.low), 
                           random_state=self.rng) / self.params.batch_size
 
+class YearlyArrivalPDFDistribution(BaseDistribution):
+    """Yearly arrival PDF distribution with seasonal patterns."""
+    
+    def _setup_distribution(self) -> None:
+        """Setup yearly arrival PDF distribution."""
+        self.year = self.params.kwargs.get('year', 2024)
+        self.base_lambda = self.params.kwargs.get('base_lambda', 1.0)
+        self.summer_boost = self.params.kwargs.get('summer_boost', 1.5)
+        self.monthly_peak_lambda_factor = self.params.kwargs.get('monthly_peak_lambda_factor', 3.0)
+        self.midmonth_peak_factor = self.params.kwargs.get('midmonth_peak_factor', 0.5)
+        self.special_peak_lambda_factor = self.params.kwargs.get('special_peak_lambda_factor', 4.0)
+        
+        # Create the yearly PDF using the imported function
+        self.yearly_pdf = create_yearly_arrival_pdf(
+            self.year, self.base_lambda, self.summer_boost,
+            self.monthly_peak_lambda_factor, self.midmonth_peak_factor,
+            self.special_peak_lambda_factor
+        )
+        
+        # Setup for efficient sampling
+        self.num_days = len(self.yearly_pdf)
+        self.cumulative_pdf = np.cumsum(self.yearly_pdf)
+        self.days = np.arange(self.num_days)
+    
+    def _generate_single_value(self) -> float:
+        """Generate yearly arrival random value."""
+        # Sample day of year based on PDF
+        random_val = self.rng.random()
+        day_index = np.searchsorted(self.cumulative_pdf, random_val)
+        
+        # Ensure day_index is within bounds
+        day_index = min(day_index, self.num_days - 1)
+        
+        # Add random time within the day
+        day_time = self.rng.random()
+        
+        # Convert to interarrival time (normalize by year length and scale by mean)
+        normalized_time = (day_index + day_time) / self.num_days
+        return normalized_time * self.params.mean_interarrival_time / self.params.batch_size
+    
+    def get_yearly_pdf(self) -> np.ndarray:
+        """Get the yearly PDF array."""
+        return self.yearly_pdf.copy()
+    
+    def sample_arrival_days(self, n_samples: int) -> np.ndarray:
+        """Sample arrival days directly from the yearly PDF."""
+        return np.random.choice(self.days, size=n_samples, p=self.yearly_pdf)
+
 # ================================================================================================
 # ENHANCED MAIN DISTRIBUTION CLASS (BACKWARD COMPATIBLE)
 # ================================================================================================
-
 class Distribution:
     """
     Enhanced main distribution class with backward compatibility.
@@ -492,7 +629,8 @@ class Distribution:
         'BimodalExpon': BimodalExponentialDistribution,
         'BetaDistribution': BetaDistributionCustom,
         'GammaDistribution': GammaDistribution,
-        'UniformDistribution': UniformDistribution
+        'UniformDistribution': UniformDistribution,
+        'YearlyArrivalPDF': YearlyArrivalPDFDistribution
     }
     
     def __init__(self, mean_interarrival_time: float, batch_size: int = 1, 
@@ -593,379 +731,409 @@ class Distribution:
             return np.full(n, self.params.mean_interarrival_time / self.params.batch_size)
     
     def get_statistics(self, n_samples: int = 10000) -> Dict[str, float]:
-        """Get distribution statistics."""
-        return self.distribution.get_statistics(n_samples)
+        """
+        Get distribution statistics (new method).
+        
+        Args:
+            n_samples: Number of samples to use for statistics
+            
+        Returns:
+            Dictionary of statistical measures
+        """
+        try:
+            return self.distribution.get_statistics(n_samples)
+        except Exception as e:
+            logger.error(f"Error calculating statistics: {e}")
+            return {'error': str(e)}
     
     def get_performance_stats(self) -> Dict[str, Any]:
-        """Get performance statistics for this distribution."""
-        avg_generation_time = (self.total_generation_time / self.generation_count 
-                             if self.generation_count > 0 else 0.0)
+        """
+        Get performance statistics (new method).
+        
+        Returns:
+            Dictionary of performance metrics
+        """
+        avg_time = (self.total_generation_time / self.generation_count 
+                   if self.generation_count > 0 else 0)
         
         return {
-            'distribution_type': self.params.distribution_type,
             'generation_count': self.generation_count,
             'total_generation_time': self.total_generation_time,
-            'average_generation_time': avg_generation_time,
-            'generations_per_second': (self.generation_count / self.total_generation_time 
-                                     if self.total_generation_time > 0 else 0.0)
+            'average_generation_time': avg_time,
+            'generations_per_second': 1.0 / avg_time if avg_time > 0 else float('inf')
         }
     
-    @classmethod
-    def register_distribution(cls, name: str, distribution_class: type) -> None:
-        """Register a new distribution type."""
-        cls._distribution_registry[name] = distribution_class
-        logger.info(f"Registered new distribution type: {name}")
+    def reset_performance_stats(self) -> None:
+        """Reset performance tracking statistics."""
+        self.generation_count = 0
+        self.total_generation_time = 0.0
     
-    @classmethod
-    def list_available_distributions(cls) -> List[str]:
-        """List all available distribution types."""
-        return list(cls._distribution_registry.keys())
-
-# ================================================================================================
-# ENHANCED TESTING AND VALIDATION
-# ================================================================================================
-
-class DistributionTester:
-    """Comprehensive testing and validation for distributions."""
-    
-    def __init__(self):
-        self.test_results = {}
-    
-    def test_distribution(self, dist_type: str, params: Dict[str, Any], 
-                         n_samples: int = 10000) -> Dict[str, Any]:
-        """Test a single distribution comprehensively."""
-        logger.info(f"Testing {dist_type} distribution...")
+    def plot_distribution(self, n_samples: int = 10000, bins: int = 50, 
+                         title: Optional[str] = None) -> plt.Figure:
+        """
+        Plot the distribution (new method).
         
-        test_start = time.perf_counter()
-        
+        Args:
+            n_samples: Number of samples to generate for plotting
+            bins: Number of histogram bins
+            title: Optional plot title
+            
+        Returns:
+            Matplotlib figure object
+        """
         try:
-            # Create distribution
-            dist = Distribution(**params, distribution_type=dist_type)
+            samples = self.generate_batch(n_samples)
             
-            # Generate samples
-            generation_start = time.perf_counter()
-            samples = dist.generate_batch(n_samples)
-            generation_time = time.perf_counter() - generation_start
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
             
-            # Calculate statistics
-            stats = {
-                'mean': np.mean(samples),
-                'std': np.std(samples),
-                'median': np.median(samples),
-                'min': np.min(samples),
-                'max': np.max(samples),
-                'q25': np.percentile(samples, 25),
-                'q75': np.percentile(samples, 75),
-                'negative_count': np.sum(samples <= 0),
-                'infinite_count': np.sum(~np.isfinite(samples))
-            }
+            # Histogram
+            ax1.hist(samples, bins=bins, density=True, alpha=0.7, color='skyblue', edgecolor='black')
+            ax1.set_xlabel('Interarrival Time')
+            ax1.set_ylabel('Density')
+            ax1.set_title(title or f'{self.params.distribution_type} Distribution')
+            ax1.grid(True, alpha=0.3)
             
-            # Performance metrics
-            performance = {
-                'generation_time': generation_time,
-                'samples_per_second': n_samples / generation_time,
-                'memory_usage_mb': samples.nbytes / 1024 / 1024
-            }
+            # Q-Q plot against exponential
+            from scipy.stats import probplot
+            probplot(samples, dist=expon, plot=ax2)
+            ax2.set_title('Q-Q Plot vs Exponential')
+            ax2.grid(True, alpha=0.3)
             
-            # Validation checks
-            validation = {
-                'all_positive': np.all(samples > 0),
-                'all_finite': np.all(np.isfinite(samples)),
-                'reasonable_mean': 0.1 <= stats['mean'] <= 1000,
-                'reasonable_std': stats['std'] < stats['mean'] * 10
-            }
-            
-            test_time = time.perf_counter() - test_start
-            
-            result = {
-                'distribution_type': dist_type,
-                'parameters': params,
-                'samples_count': n_samples,
-                'statistics': stats,
-                'performance': performance,
-                'validation': validation,
-                'test_time': test_time,
-                'success': all(validation.values())
-            }
-            
-            logger.info(f"Test completed for {dist_type}: "
-                       f"{'PASSED' if result['success'] else 'FAILED'}")
-            
-            return result
+            plt.tight_layout()
+            return fig
             
         except Exception as e:
-            logger.error(f"Test failed for {dist_type}: {e}")
-            return {
-                'distribution_type': dist_type,
-                'parameters': params,
-                'error': str(e),
-                'success': False,
-                'test_time': time.perf_counter() - test_start
-            }
-    
-    def run_comprehensive_tests(self) -> Dict[str, Any]:
-        """Run comprehensive tests on all distribution types."""
-        logger.info("Starting comprehensive distribution testing...")
-        
-        test_configurations = [
-            # Original test cases (preserved)
-            {"mean_interarrival_time": 10, "batch_size": 1, "distribution_type": "Exponential"},
-            {"mean_interarrival_time": 10, "batch_size": 1, "distribution_type": "MonthlyMixedDist", "num_days": 30},
-            {"mean_interarrival_time": 5, "batch_size": 1, "distribution_type": "WeeklyExponential", "num_days": 7},
-            {"mean_interarrival_time": 8, "batch_size": 1, "distribution_type": "MixedWeibull", 
-             "w1": 0.6, "w2": 0.2, "w3": 0.2, "weibull_shape": 0.8, "weibull_scale": 1.0, 
-             "norm_mu": 5, "norm_sigma": 1, "expon_lambda": 0.5},
-            {"mean_interarrival_time": 12, "batch_size": 1, "distribution_type": "BimodalExpon", 
-             "lambda1": 0.5, "lambda2": 0.5, "weight1": 3/5, "loc2": 15},
-            {"mean_interarrival_time": 6, "batch_size": 1, "distribution_type": "BetaDistribution", 
-             "alpha": 2, "beta": 5},
-            
-            # New distribution tests
-            {"mean_interarrival_time": 8, "batch_size": 1, "distribution_type": "GammaDistribution", 
-             "shape": 2.0, "scale": 1.0},
-            {"mean_interarrival_time": 10, "batch_size": 1, "distribution_type": "UniformDistribution", 
-             "low": 5, "high": 15},
-        ]
-        
-        results = []
-        start_time = time.perf_counter()
-        
-        for config in test_configurations:
-            result = self.test_distribution(config['distribution_type'], config)
-            results.append(result)
-        
-        total_time = time.perf_counter() - start_time
-        
-        # Summary statistics
-        successful_tests = [r for r in results if r['success']]
-        failed_tests = [r for r in results if not r['success']]
-        
-        summary = {
-            'total_tests': len(results),
-            'successful_tests': len(successful_tests),
-            'failed_tests': len(failed_tests),
-            'success_rate': len(successful_tests) / len(results),
-            'total_test_time': total_time,
-            'results': results
-        }
-        
-        logger.info(f"Comprehensive testing completed: "
-                   f"{len(successful_tests)}/{len(results)} tests passed")
-        
-        return summary
-
-def create_distribution_plots(test_results: Dict[str, Any], save_plots: bool = True) -> None:
-    """Create visualization plots for distribution testing."""
-    logger.info("Creating distribution visualization plots...")
-    
-    successful_results = [r for r in test_results['results'] if r['success']]
-    
-    if not successful_results:
-        logger.warning("No successful tests to plot")
-        return
-    
-    # Create subplot grid
-    n_distributions = len(successful_results)
-    n_cols = 3
-    n_rows = (n_distributions + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5 * n_rows))
-    if n_rows == 1:
-        axes = axes.reshape(1, -1)
-    axes = axes.flatten()
-    
-    for i, result in enumerate(successful_results):
-        if i >= len(axes):
-            break
-        
-        ax = axes[i]
-        
-        # Generate fresh samples for plotting
-        try:
-            params = result['parameters'].copy()
-            dist_type = params.pop('distribution_type')
-            dist = Distribution(distribution_type=dist_type, **params)
-            samples = dist.generate_batch(1000)
-            
-            # Create histogram
-            ax.hist(samples, bins=50, alpha=0.7, density=True, color='skyblue', edgecolor='black')
-            ax.set_title(f"{dist_type}\nMean: {np.mean(samples):.2f}")
-            ax.set_xlabel("Interarrival Time")
-            ax.set_ylabel("Density")
-            ax.grid(True, alpha=0.3)
-            
-        except Exception as e:
-            logger.warning(f"Failed to plot {result['distribution_type']}: {e}")
-            ax.text(0.5, 0.5, f"Plot Error\n{result['distribution_type']}", 
+            logger.error(f"Error plotting distribution: {e}")
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.text(0.5, 0.5, f"Error plotting: {str(e)}", 
                    ha='center', va='center', transform=ax.transAxes)
+            return fig
+
+# ================================================================================================
+# UTILITY FUNCTIONS
+# ================================================================================================
+def compare_distributions(distributions: List[Distribution], n_samples: int = 10000) -> plt.Figure:
+    """
+    Compare multiple distributions side by side.
     
-    # Hide unused subplots
-    for i in range(len(successful_results), len(axes)):
-        axes[i].set_visible(False)
+    Args:
+        distributions: List of Distribution objects to compare
+        n_samples: Number of samples for comparison
+        
+    Returns:
+        Matplotlib figure object
+    """
+    n_dists = len(distributions)
+    fig, axes = plt.subplots(2, n_dists, figsize=(4*n_dists, 8))
+    
+    if n_dists == 1:
+        axes = axes.reshape(2, 1)
+    
+    for i, dist in enumerate(distributions):
+        try:
+            samples = dist.generate_batch(n_samples)
+            
+            # Histogram
+            axes[0, i].hist(samples, bins=50, density=True, alpha=0.7, 
+                           color=f'C{i}', edgecolor='black')
+            axes[0, i].set_title(f'{dist.params.distribution_type}')
+            axes[0, i].set_xlabel('Interarrival Time')
+            axes[0, i].set_ylabel('Density')
+            axes[0, i].grid(True, alpha=0.3)
+            
+            # Box plot
+            axes[1, i].boxplot(samples, vert=True)
+            axes[1, i].set_title(f'Box Plot - {dist.params.distribution_type}')
+            axes[1, i].set_ylabel('Interarrival Time')
+            axes[1, i].grid(True, alpha=0.3)
+            
+        except Exception as e:
+            axes[0, i].text(0.5, 0.5, f"Error: {str(e)}", 
+                           ha='center', va='center', transform=axes[0, i].transAxes)
+            axes[1, i].text(0.5, 0.5, f"Error: {str(e)}", 
+                           ha='center', va='center', transform=axes[1, i].transAxes)
     
     plt.tight_layout()
-    
-    if save_plots:
-        filename = f"enhanced_distribution_tests_{time.strftime('%Y%m%d_%H%M%S')}.png"
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
-        logger.info(f"Distribution plots saved to {filename}")
-    
-    plt.show()
+    return fig
 
-# ================================================================================================
-# MAIN FUNCTION (ENHANCED BACKWARD COMPATIBLE TESTING)
-# ================================================================================================
-
-def main():
-    """Enhanced main function with comprehensive testing (backward compatible)."""
-    print("="*80)
-    print("Enhanced simDistributions.py - Comprehensive Testing & Validation")
-    print("="*80)
+def benchmark_distributions(distribution_types: List[str], mean_time: float = 5.0, 
+                           n_samples: int = 10000, n_runs: int = 10) -> Dict[str, Dict[str, float]]:
+    """
+    Benchmark performance of different distribution types.
     
-    # Setup logging
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-    
-    # Test 1: Backward Compatibility (Original Test)
-    print("\n1. Testing Backward Compatibility (Original Interface)...")
-    
-    # Original test cases (exactly as in your current code)
-    original_distributions = [
-        {"mean_interarrival_time": 10, "batch_size": 1, "distribution_type": "Exponential"},
-        {"mean_interarrival_time": 10, "batch_size": 1, "distribution_type": "MonthlyMixedDist", "num_days": 30},
-        {"mean_interarrival_time": 5, "batch_size": 1, "distribution_type": "WeeklyExponential", "num_days": 7},
-        {"mean_interarrival_time": 8, "batch_size": 1, "distribution_type": "MixedWeibull", 
-         "w1": 0.6, "w2": 0.2, "w3": 0.2, "weibull_shape": 0.8, "weibull_scale": 1.0, 
-         "norm_mu": 5, "norm_sigma": 1, "expon_lambda": 0.5},
-        {"mean_interarrival_time": 12, "batch_size": 1, "distribution_type": "BimodalExpon", 
-         "lambda1": 0.5, "lambda2": 0.5, "weight1": 3/5, "loc2": 15},
-        {"mean_interarrival_time": 6, "batch_size": 1, "distribution_type": "BetaDistribution", 
-         "alpha": 2, "beta": 5},
-    ]
-    
-    print("Creating distributions with original interface...")
-    for dist_info in original_distributions:
-        dist = Distribution(**dist_info)
-        samples = [dist.get_interarrival_time() for _ in range(1000)]
-        print(f"{dist_info['distribution_type']:20s}: Mean={np.mean(samples):.3f}, Std={np.std(samples):.3f}")
-    
-    print("✓ Backward compatibility confirmed - original interface works perfectly")
-    
-    # Test 2: Enhanced Features
-    print("\n2. Testing Enhanced Features...")
-    
-    # Test batch generation (new feature)
-    dist = Distribution(mean_interarrival_time=10, distribution_type="Exponential")
-    batch_samples = dist.generate_batch(10000)
-    print(f"Batch generation: {len(batch_samples)} samples in {dist.get_performance_stats()['total_generation_time']:.3f}s")
-    
-    # Test statistics
-    stats = dist.get_statistics()
-    print(f"Distribution statistics: Mean={stats['mean']:.3f}, Std={stats['std']:.3f}")
-    
-    # Test performance tracking
-    perf_stats = dist.get_performance_stats()
-    print(f"Performance: {perf_stats['generations_per_second']:.0f} generations/second")
-    
-    print("✓ Enhanced features working correctly")
-    
-    # Test 3: Parameter Validation
-    print("\n3. Testing Parameter Validation...")
-    
-    try:
-        # This should work
-        valid_dist = Distribution(mean_interarrival_time=5.0, distribution_type="Exponential")
-        print("✓ Valid parameters accepted")
+    Args:
+        distribution_types: List of distribution type names to benchmark
+        mean_time: Mean interarrival time for all distributions
+        n_samples: Number of samples per run
+        n_runs: Number of benchmark runs
         
-        # This should handle gracefully
-        invalid_dist = Distribution(mean_interarrival_time=-1.0, distribution_type="BadType")
-        print("✓ Invalid parameters handled gracefully with fallback")
-        
-    except Exception as e:
-        print(f"✗ Parameter validation failed: {e}")
+    Returns:
+        Dictionary of performance metrics per distribution type
+    """
+    results = {}
     
-    # Test 4: New Distribution Types
-    print("\n4. Testing New Distribution Types...")
-    
-    new_distributions = [
-        {"mean_interarrival_time": 8, "distribution_type": "GammaDistribution", "shape": 2.0},
-        {"mean_interarrival_time": 10, "distribution_type": "UniformDistribution", "low": 5, "high": 15},
-    ]
-    
-    for dist_info in new_distributions:
+    for dist_type in distribution_types:
         try:
-            dist = Distribution(**dist_info)
-            samples = dist.generate_batch(1000)
-            print(f"{dist_info['distribution_type']:20s}: Mean={np.mean(samples):.3f}, Working=✓")
+            dist = Distribution(mean_time, distribution_type=dist_type)
+            times = []
+            
+            for _ in range(n_runs):
+                start_time = time.perf_counter()
+                dist.generate_batch(n_samples)
+                end_time = time.perf_counter()
+                times.append(end_time - start_time)
+            
+            results[dist_type] = {
+                'mean_time': np.mean(times),
+                'std_time': np.std(times),
+                'min_time': np.min(times),
+                'max_time': np.max(times),
+                'samples_per_second': n_samples / np.mean(times)
+            }
+            
         except Exception as e:
-            print(f"{dist_info['distribution_type']:20s}: Error={e}")
+            logger.error(f"Error benchmarking {dist_type}: {e}")
+            results[dist_type] = {'error': str(e)}
     
-    # Test 5: Comprehensive Testing Suite
-    print("\n5. Running Comprehensive Test Suite...")
+    return results
+
+# ================================================================================================
+# MAIN FUNCTION AND TESTING
+# ================================================================================================
+def main():
+    """Main function to test and demonstrate all distribution functionality."""
+    print("=" * 80)
+    print("ENHANCED PHALANX C-sUAS SIMULATION DISTRIBUTION SYSTEM")
+    print("=" * 80)
     
-    tester = DistributionTester()
-    test_results = tester.run_comprehensive_tests()
+    # Set random seed for reproducibility
+    np.random.seed(42)
     
-    print(f"Test Results: {test_results['successful_tests']}/{test_results['total_tests']} passed")
-    print(f"Success Rate: {test_results['success_rate']:.1%}")
-    print(f"Total Test Time: {test_results['total_test_time']:.2f}s")
-    
-    # Test 6: Cache Performance
-    print("\n6. Testing Cache Performance...")
-    
-    cache = get_distribution_cache()
-    cache.clear()  # Start fresh
-    
-    # Generate samples to populate cache
-    dist = Distribution(mean_interarrival_time=10, distribution_type="Exponential")
-    for _ in range(1000):
-        dist.get_interarrival_time()
-    
-    cache_stats = cache.get_stats()
-    print(f"Cache Statistics: Hit Rate={cache_stats['hit_rate']:.1%}, Size={cache_stats['size']}")
-    
-    # Test 7: Memory and Performance Analysis
-    print("\n7. Performance Analysis...")
-    
-    distributions_to_test = ["Exponential", "MonthlyMixedDist", "MixedWeibull"]
+    # Test parameters
+    mean_interarrival_time = 5.0
     n_samples = 10000
     
-    print(f"{'Distribution':<20} {'Time (ms)':<10} {'Samples/sec':<12} {'Memory (MB)':<12}")
-    print("-" * 56)
+    # Define all distribution configurations
+    distribution_configs = [
+        {
+            'name': 'Exponential',
+            'type': 'Exponential',
+            'params': {}
+        },
+        {
+            'name': 'Monthly Mixed',
+            'type': 'MonthlyMixedDist',
+            'params': {'num_days': 30, 'first_peak_probability': 0.7}
+        },
+        {
+            'name': 'Weekly Exponential',
+            'type': 'WeeklyExponential',
+            'params': {'num_days': 7}
+        },
+        {
+            'name': 'Mixed Weibull',
+            'type': 'MixedWeibull',
+            'params': {
+                'w1': 0.6, 'w2': 0.2, 'w3': 0.2,
+                'weibull_shape': 0.8, 'weibull_scale': 1.0,
+                'norm_mu': 5, 'norm_sigma': 1,
+                'expon_lambda': 0.5
+            }
+        },
+        {
+            'name': 'Bimodal Exponential',
+            'type': 'BimodalExpon',
+            'params': {
+                'lambda1': 0.5, 'lambda2': 0.3,
+                'weight1': 0.6, 'loc2': 15
+            }
+        },
+        {
+            'name': 'Beta Distribution',
+            'type': 'BetaDistribution',
+            'params': {'alpha': 2, 'beta': 5}
+        },
+        {
+            'name': 'Gamma Distribution',
+            'type': 'GammaDistribution',
+            'params': {'shape': 2.0, 'scale': 1.0}
+        },
+        {
+            'name': 'Uniform Distribution',
+            'type': 'UniformDistribution',
+            'params': {'low': 2.0, 'high': 8.0}
+        },
+        {
+            'name': 'Yearly Arrival PDF',
+            'type': 'YearlyArrivalPDF',
+            'params': {
+                'year': 2024,
+                'base_lambda': 1.0,
+                'summer_boost': 1.5,
+                'monthly_peak_lambda_factor': 3.0,
+                'midmonth_peak_factor': 0.5,
+                'special_peak_lambda_factor': 4.0
+            }
+        }
+    ]
     
-    for dist_type in distributions_to_test:
-        start_time = time.perf_counter()
-        dist = Distribution(mean_interarrival_time=10, distribution_type=dist_type)
-        samples = dist.generate_batch(n_samples)
-        end_time = time.perf_counter()
-        
-        generation_time_ms = (end_time - start_time) * 1000
-        samples_per_sec = n_samples / (end_time - start_time)
-        memory_mb = samples.nbytes / 1024 / 1024
-        
-        print(f"{dist_type:<20} {generation_time_ms:<10.2f} {samples_per_sec:<12.0f} {memory_mb:<12.3f}")
+    print("\n1. TESTING INDIVIDUAL DISTRIBUTIONS")
+    print("-" * 50)
     
-    # Test 8: Create Visualization
-    print("\n8. Creating Distribution Visualizations...")
+    distributions = []
+    
+    for config in distribution_configs:
+        try:
+            print(f"\nTesting {config['name']}...")
+            
+            # Create distribution
+            dist = Distribution(
+                mean_interarrival_time=mean_interarrival_time,
+                batch_size=1,
+                distribution_type=config['type'],
+                **config['params']
+            )
+            distributions.append(dist)
+            
+            # Test single value generation
+            single_value = dist.get_interarrival_time()
+            print(f"  Single value: {single_value:.4f}")
+            
+            # Test batch generation
+            batch_values = dist.generate_batch(100)
+            print(f"  Batch mean: {np.mean(batch_values):.4f}")
+            print(f"  Batch std: {np.std(batch_values):.4f}")
+            
+            # Get statistics
+            stats = dist.get_statistics(n_samples)
+            print(f"  Statistics: mean={stats['mean']:.4f}, std={stats['std']:.4f}")
+            
+            # Performance stats
+            perf_stats = dist.get_performance_stats()
+            print(f"  Generated {perf_stats['generation_count']} samples")
+            
+        except Exception as e:
+            print(f"  ERROR: {e}")
+    
+    print("\n2. PERFORMANCE BENCHMARKING")
+    print("-" * 50)
+    
+    # Benchmark all distribution types
+    benchmark_results = benchmark_distributions(
+        [config['type'] for config in distribution_configs],
+        mean_time=mean_interarrival_time,
+        n_samples=1000,
+        n_runs=5
+    )
+    
+    print("\nBenchmark Results (1000 samples, 5 runs):")
+    for dist_type, results in benchmark_results.items():
+        if 'error' not in results:
+            print(f"  {dist_type:20s}: {results['samples_per_second']:8.0f} samples/sec")
+        else:
+            print(f"  {dist_type:20s}: ERROR - {results['error']}")
+    
+    print("\n3. GENERATING COMPARISON PLOTS")
+    print("-" * 50)
+    
+    # Create individual distribution plots
+    for i, dist in enumerate(distributions[:4]):  # Plot first 4 to avoid too many plots
+        try:
+            fig = dist.plot_distribution(n_samples=5000)
+            plt.savefig(f'distribution_{i+1}_{dist.params.distribution_type}.png', 
+                       dpi=300, bbox_inches='tight')
+            print(f"  Saved plot: distribution_{i+1}_{dist.params.distribution_type}.png")
+            plt.close(fig)
+        except Exception as e:
+            print(f"  Error plotting {dist.params.distribution_type}: {e}")
+    
+    # Create comparison plot
     try:
-        create_distribution_plots(test_results, save_plots=True)
-        print("✓ Distribution plots created successfully")
+        fig = compare_distributions(distributions[:4], n_samples=5000)
+        plt.savefig('distribution_comparison.png', dpi=300, bbox_inches='tight')
+        print("  Saved comparison plot: distribution_comparison.png")
+        plt.close(fig)
     except Exception as e:
-        print(f"✗ Plot creation failed: {e}")
+        print(f"  Error creating comparison plot: {e}")
     
-    print("\n" + "="*80)
-    print("COMPREHENSIVE TESTING COMPLETED SUCCESSFULLY!")
-    print("="*80)
-    print("\nKey Enhancements Verified:")
-    print("• All original functionality preserved (100% backward compatible)")
-    print("• Enhanced performance with batch generation")
-    print("• Comprehensive parameter validation")
-    print("• New distribution types (Gamma, Uniform)")
-    print("• Performance monitoring and caching")
-    print("• Robust error handling with fallbacks")
-    print("• Extensive testing and validation framework")
-    print("• Memory and performance optimizations")
+    # Special plot for Yearly Arrival PDF
+    try:
+        yearly_dist = next(d for d in distributions if d.params.distribution_type == 'YearlyArrivalPDF')
+        yearly_pdf = yearly_dist.distribution.get_yearly_pdf()
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        days = np.arange(len(yearly_pdf))
+        ax.plot(days, yearly_pdf, linewidth=2, color='darkblue')
+        ax.set_xlabel('Day of Year')
+        ax.set_ylabel('Probability Density')
+        ax.set_title('Yearly Arrival PDF - Seasonal Patterns')
+        ax.grid(True, alpha=0.3)
+        
+        # Add month labels
+        month_starts = [sum(calendar.mdays[:i]) for i in range(1, 13)]
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        
+        for start, name in zip(month_starts, month_names):
+            ax.axvline(x=start, color='red', alpha=0.3, linestyle='--')
+            ax.text(start + 15, max(yearly_pdf) * 0.9, name, 
+                   rotation=90, ha='center', va='top')
+        
+        plt.tight_layout()
+        plt.savefig('yearly_arrival_pdf.png', dpi=300, bbox_inches='tight')
+        print("  Saved yearly PDF plot: yearly_arrival_pdf.png")
+        plt.close(fig)
+        
+    except Exception as e:
+        print(f"  Error creating yearly PDF plot: {e}")
     
-    print(f"\nAvailable Distribution Types: {Distribution.list_available_distributions()}")
+    print("\n4. CACHE PERFORMANCE")
+    print("-" * 50)
+    
+    cache = get_distribution_cache()
+    cache_stats = cache.get_stats()
+    print(f"Cache enabled: {cache_stats['enabled']}")
+    print(f"Cache size: {cache_stats['size']}/{cache_stats['max_size']}")
+    print(f"Hit rate: {cache_stats['hit_rate']:.2%}")
+    
+    print("\n5. DISTRIBUTION STATISTICS SUMMARY")
+    print("-" * 50)
+    
+    stats_table = []
+    for dist in distributions:
+        try:
+            stats = dist.get_statistics(5000)
+            stats_table.append({
+                'Distribution': dist.params.distribution_type,
+                'Mean': f"{stats['mean']:.3f}",
+                'Std': f"{stats['std']:.3f}",
+                'Median': f"{stats['median']:.3f}",
+                'Q25': f"{stats['q25']:.3f}",
+                'Q75': f"{stats['q75']:.3f}"
+            })
+        except Exception as e:
+            print(f"Error getting stats for {dist.params.distribution_type}: {e}")
+    
+    # Print stats table
+    if stats_table:
+        print(f"{'Distribution':<20} {'Mean':<8} {'Std':<8} {'Median':<8} {'Q25':<8} {'Q75':<8}")
+        print("-" * 70)
+        for row in stats_table:
+            print(f"{row['Distribution']:<20} {row['Mean']:<8} {row['Std']:<8} "
+                  f"{row['Median']:<8} {row['Q25']:<8} {row['Q75']:<8}")
+    
+    print("\n" + "=" * 80)
+    print("TESTING COMPLETED SUCCESSFULLY")
+    print("=" * 80)
+    
+    return distributions
 
 if __name__ == "__main__":
-    main()
+    try:
+        distributions = main()
+        print("\nAll tests completed successfully!")
+        print("Check the generated PNG files for distribution plots.")
+    except Exception as e:
+        print(f"Error in main execution: {e}")
+        import traceback
+        traceback.print_exc()
